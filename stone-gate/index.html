@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        * {margin:0; padding:0; box-sizing:border-box;}
+        body{
+            background:#111; font-family:monospace;
+            display:flex; flex-direction:column;
+            justify-content:center; align-items:center;
+            min-height:100vh; color:#fff;
+            user-select: none;
+        }
+        /* 角色属性面板 */
+        #status-panel {
+            position:fixed; top:20px; left:50%; transform:translateX(-50%);
+            background:#222; padding:10px 20px; border:2px solid #ffc107;
+            border-radius:8px; display:flex; gap:20px; z-index:998;
+        }
+        .status-item {
+            display:flex; align-items:center; gap:5px;
+        }
+        .hp-bar {
+            width:100px; height:15px; background:#444; border-radius:5px; overflow:hidden;
+        }
+        .hp-fill {background:#ff4444; height:100%; width:100%;}
+        .hunger-bar {
+            width:100px; height:15px; background:#444; border-radius:5px; overflow:hidden;
+        }
+        .hunger-fill {background:#4CAF50; height:100%; width:100%;}
+        
+        /* 前置剧情加载页 */
+        #loading-screen {
+            position:fixed; top:0; left:0; width:100%; height:100%;
+            background:#000; display:flex; flex-direction:column;
+            justify-content:center; align-items:center;
+            z-index:9999;
+        }
+        #loading-plot {
+            font-size:24px; margin-bottom:30px; text-align:center;
+            padding:0 20px; line-height:1.8;
+        }
+        #loading-progress {
+            width:400px; height:25px; border:2px solid #ffc107;
+            overflow:hidden; border-radius:12px;
+        }
+        #progress-bar {
+            width:0; height:100%; background:#ffc107;
+            transition:width 2s linear;
+        }
+        
+        /* 游戏界面 */
+        #game-screen {display:none;}
+        table{border-collapse:collapse; margin-top:80px;}
+        td{
+            width:25px; height:25px; border:1px solid #333;
+            text-align:center; font-size:16px;
+        }
+        .wall{background:#444; color:#444;}
+        .ground{background:#1a1a1a; color:#ccc;}
+        .npc{background:#e7a762; color:#000;}
+        .box{background:#1e5a9e; color:#fff;}
+        .enemy{background:#a83232; color:#fff;}
+        .food{background:#4CAF50; color:#fff;}
+        #player{background:#ffc107 !important; color:#000 !important; font-weight:bold;}
+        
+        /* 剧情/战斗弹窗 */
+        #dialog {
+            position:fixed; top:50%; left:50%; transform:translate(-50%, -50%);
+            background:#222; padding:20px 30px; border:3px solid #ffc107;
+            border-radius:10px; color:#fff; min-width:400px; text-align:center;
+            font-size:18px; z-index:999; display:none;
+        }
+        
+        /* 场景状态提示 */
+        #scene-status {
+            position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+            background:#222; padding:10px 20px; color:#ccc; font-size:14px;
+            z-index:998;
+        }
+        
+        /* 口袋面板 */
+        #pocket-panel {
+            position:fixed; top:80px; right:20px;
+            background:#222; padding:10px; border:2px solid #ffc107;
+            border-radius:8px; min-width:200px; z-index:998;
+        }
+        #pocket-title {text-align:center; margin-bottom:10px; font-weight:bold;}
+        .pocket-item {margin:5px 0; font-size:14px;}
+    </style>
+</head>
+<body>
+    <!-- 角色属性面板 -->
+    <div id="status-panel">
+        <div class="status-item">
+            <span>HP：</span>
+            <div class="hp-bar">
+                <div id="hp-fill" class="hp-fill"></div>
+            </div>
+            <span id="hp-text">100/100</span>
+        </div>
+        <div class="status-item">
+            <span>饥饿：</span>
+            <div class="hunger-bar">
+                <div id="hunger-fill" class="hunger-fill"></div>
+            </div>
+            <span id="hunger-text">100/100</span>
+        </div>
+    </div>
+
+    <!-- 口袋面板 -->
+    <div id="pocket-panel">
+        <div id="pocket-title">主角口袋</div>
+        <div id="pocket-content">
+            <div class="pocket-item">金币：<span id="gold-count">0</span></div>
+            <div class="pocket-item">食品：<span id="food-count">0</span></div>
+        </div>
+    </div>
+
+    <!-- 前置剧情加载页 -->
+    <div id="loading-screen">
+        <div id="loading-plot">AI编译中：古老迷宫的生存法则...</div>
+        <div id="loading-progress">
+            <div id="progress-bar"></div>
+        </div>
+    </div>
+
+    <!-- 游戏界面 -->
+    <div id="game-screen">
+        <div id="dialog"></div> <!-- 剧情/战斗弹窗 -->
+        <table id="map" tabindex="0"></table>
+        <div id="scene-status">场景(0,0) | 主角(16,16) | 种子：0 | 单场景静态运行</div>
+    </div>
+
+    <script>
+        const MAP_SIZE = 32;
+        // 本地存储键值
+        const SEED_STORAGE_KEY = "maze_scene_seeds";    // 场景种子（仅存这个）
+        const POCKET_STORAGE_KEY = "player_pocket";     // 主角口袋数据
+        const STATUS_STORAGE_KEY = "player_status";     // 主角属性数据
+
+        // 全局状态
+        let game_state = {
+            // 场景相关
+            current_scene_x: 0,
+            current_scene_y: 0,
+            player_x: 16,          // 主角X坐标（WASD控制）
+            player_y: 16,          // 主角Y坐标
+            current_seed: 0,
+            current_scene_data: null,  // 单场景内临时存，跨场景清空
+            scene_seed_db: load_scene_seeds() || {},
+
+            // 角色属性（本地持久化）
+            player_status: load_player_status() || {
+                hp: 100,
+                max_hp: 100,
+                hunger: 100,
+                max_hunger: 100
+            },
+
+            // 口袋数据（仅存这个，其余种子解包）
+            player_pocket: load_player_pocket() || {
+                gold: 0,
+                food: 0
+            }
+        };
+
+        // ========== 本地存储方法（仅存种子+口袋+属性） ==========
+        // 加载场景种子（老场景仅存这个）
+        function load_scene_seeds() {
+            const data = localStorage.getItem(SEED_STORAGE_KEY);
+            return data ? JSON.parse(data) : {};
+        }
+
+        // 保存场景种子
+        function save_scene_seed(scene_x, scene_y, seed) {
+            const scene_key = `${scene_x}_${scene_y}`;
+            game_state.scene_seed_db[scene_key] = seed;
+            localStorage.setItem(SEED_STORAGE_KEY, JSON.stringify(game_state.scene_seed_db));
+            if (scene_x !== game_state.current_scene_x || scene_y !== game_state.current_scene_y) {
+                game_state.current_scene_data = null; // 跨场景清空完整数据
+            }
+        }
+
+        // 加载主角口袋数据（仅存这个）
+        function load_player_pocket() {
+            const data = localStorage.getItem(POCKET_STORAGE_KEY);
+            return data ? JSON.parse(data) : null;
+        }
+
+        // 保存口袋数据
+        function save_player_pocket() {
+            localStorage.setItem(POCKET_STORAGE_KEY, JSON.stringify(game_state.player_pocket));
+            update_pocket_panel(); // 更新面板显示
+        }
+
+        // 加载角色属性
+        function load_player_status() {
+            const data = localStorage.getItem(STATUS_STORAGE_KEY);
+            return data ? JSON.parse(data) : null;
+        }
+
+        // 保存角色属性
+        function save_player_status() {
+            localStorage.setItem(STATUS_STORAGE_KEY, JSON.stringify(game_state.player_status));
+            update_status_panel(); // 更新面板显示
+        }
+
+        // ========== 面板更新方法 ==========
+        // 更新属性面板（HP/饥饿值）
+        function update_status_panel() {
+            const hpPercent = (game_state.player_status.hp / game_state.player_status.max_hp) * 100;
+            document.getElementById("hp-fill").style.width = `${hpPercent}%`;
+            document.getElementById("hp-text").innerText = `${game_state.player_status.hp}/${game_state.player_status.max_hp}`;
+
+            const hungerPercent = (game_state.player_status.hunger / game_state.player_status.max_hunger) * 100;
+            document.getElementById("hunger-fill").style.width = `${hungerPercent}%`;
+            document.getElementById("hunger-text").innerText = `${game_state.player_status.hunger}/${game_state.player_status.max_hunger}`;
+        }
+
+        // 更新口袋面板
+        function update_pocket_panel() {
+            document.getElementById("gold-count").innerText = game_state.player_pocket.gold;
+            document.getElementById("food-count").innerText = game_state.player_pocket.food;
+        }
+
+        // ========== 剧情/战斗弹窗 ==========
+        function show_dialog(content) {
+            const dialog = document.getElementById("dialog");
+            dialog.innerText = content;
+            dialog.style.display = "block";
+            setTimeout(() => {
+                dialog.style.display = "none";
+            }, 3000);
+        }
+
+        // ========== 核心：获取场景种子（含四方预生成） ==========
+        async function get_scene_seed(scene_x, scene_y) {
+            const scene_key = `${scene_x}_${scene_y}`;
+            if (game_state.scene_seed_db[scene_key]) {
+                return game_state.scene_seed_db[scene_key];
+            }
+            const response = await fetch(`http://127.0.0.1:5000/api/get_scene_seed?x=${scene_x}&y=${scene_y}`);
+            const data = await response.json();
+            save_scene_seed(scene_x, scene_y, data.seed);
+            return data.seed;
+        }
+
+        // ========== 核心：种子解包生成/还原场景 ==========
+        async function generate_scene(scene_x, scene_y) {
+            const seed = await get_scene_seed(scene_x, scene_y);
+            const response = await fetch(`http://127.0.0.1:5000/api/generate_scene_by_seed?x=${scene_x}&y=${scene_y}&seed=${seed}`);
+            const scene_data = await response.json();
+            
+            game_state.current_scene_data = scene_data;
+            game_state.current_seed = seed;
+            
+            return scene_data;
+        }
+
+        // ========== 场景初始化（AI前置剧情掩盖耗时） ==========
+        async function init_scene(scene_x, scene_y) {
+            document.getElementById("loading-screen").style.display = "flex";
+            const progressBar = document.getElementById("progress-bar");
+            progressBar.style.width = "0%";
+            
+            const scene_data = await generate_scene(scene_x, scene_y);
+            
+            document.getElementById("loading-plot").innerText = scene_data.front_plot;
+            progressBar.style.width = "100%";
+
+            setTimeout(() => {
+                document.getElementById("loading-screen").style.display = "none";
+                document.getElementById("game-screen").style.display = "block";
+                render_scene(scene_data);
+                document.getElementById("map").focus();
+                update_status_panel(); // 初始化属性面板
+                update_pocket_panel(); // 初始化口袋面板
+            }, 2000);
+        }
+
+        // ========== 渲染场景（单场景静态） ==========
+        function render_scene(scene_data) {
+            const mapDom = document.getElementById("map");
+            mapDom.innerHTML = "";
+
+            // 渲染32x32地图
+            for (let y = 0; y < MAP_SIZE; y++) {
+                const tr = document.createElement("tr");
+                for (let x = 0; x < MAP_SIZE; x++) {
+                    const td = document.createElement("td");
+                    td.id = `cell_${x}_${y}`;
+
+                    // 渲染墙壁/空地
+                    if (scene_data.grid[y][x] === 1) {
+                        td.className = "wall";
+                        td.innerText = "■";
+                    } else {
+                        td.className = "ground";
+                        td.innerText = "·";
+                    }
+
+                    // 渲染交互物（NPC/宝箱/敌人/食品）
+                    scene_data.entities.forEach(entity => {
+                        if (entity.x === x && entity.y === y) {
+                            td.className = entity.type;
+                            // 交互物图标
+                            const icons = {
+                                "npc": "👤",
+                                "box": "📦",
+                                "enemy": "👹",
+                                "food": "🍎"
+                            };
+                            td.innerText = icons[entity.type] || "?";
+                        }
+                    });
+
+                    // 渲染主角
+                    if (x === game_state.player_x && y === game_state.player_y) {
+                        td.id = "player";
+                        td.innerText = "🧙";
+                    }
+
+                    tr.appendChild(td);
+                }
+                mapDom.appendChild(tr);
+            }
+
+            // 更新场景状态
+            document.getElementById("scene-status").innerText = 
+                `场景(${scene_data.scene_x},${scene_data.scene_y}) | 主角(${game_state.player_x},${game_state.player_y}) | 种子：${scene_data.seed} | 交互物：${scene_data.entities.length}个`;
+        }
+
+        // ========== 战斗系统（碰撞敌人触发） ==========
+        function fight_enemy(enemy) {
+            // 扣减HP
+            game_state.player_status.hp = Math.max(0, game_state.player_status.hp - enemy.damage);
+            // 扣减饥饿值
+            game_state.player_status.hunger = Math.max(0, game_state.player_status.hunger - 5);
+            // 保存属性
+            save_player_status();
+            // 显示战斗剧情
+            show_dialog(`${enemy.plot}\n\n你受到${enemy.damage}点伤害！\n${enemy.fight_plot}`);
+            // 死亡检测
+            if (game_state.player_status.hp <= 0) {
+                setTimeout(() => {
+                    alert("你在迷宫中倒下了！重新开始游戏...");
+                    // 重置角色状态（保留口袋数据）
+                    game_state.player_status = {
+                        hp: 100,
+                        max_hp: 100,
+                        hunger: 100,
+                        max_hunger: 100
+                    };
+                    save_player_status();
+                    // 回到初始场景
+                    game_state.current_scene_x = 0;
+                    game_state.current_scene_y = 0;
+                    game_state.player_x = 16;
+                    game_state.player_y = 16;
+                    init_scene(0, 0);
+                }, 3000);
+            }
+        }
+
+        // ========== 收集系统（食品/宝箱） ==========
+        function collect_item(entity) {
+            if (entity.type === "box") {
+                // 收集宝箱（金币）
+                game_state.player_pocket.gold += entity.reward.amount;
+                show_dialog(`${entity.plot}\n\n获得${entity.reward.amount}枚金币！`);
+            } else if (entity.type === "food") {
+                // 收集食品（恢复饥饿/HP）
+                game_state.player_pocket.food += 1;
+                game_state.player_status.hunger = Math.min(game_state.player_status.max_hunger, game_state.player_status.hunger + entity.restore.hunger);
+                game_state.player_status.hp = Math.min(game_state.player_status.max_hp, game_state.player_status.hp + entity.restore.hp);
+                show_dialog(`${entity.plot}\n\n饥饿值+${entity.restore.hunger}，HP+${entity.restore.hp}！`);
+            }
+            // 保存数据
+            save_player_pocket();
+            save_player_status();
+            // 移除已收集的物品（单场景内）
+            game_state.current_scene_data.entities = game_state.current_scene_data.entities.filter(e => 
+                !(e.x === entity.x && e.y === entity.y)
+            );
+            // 重新渲染场景
+            render_scene(game_state.current_scene_data);
+        }
+
+        // ========== 核心：WASD控制主角XY坐标 ==========
+        async function move_player(dx, dy) {
+            if (!game_state.current_scene_data) return;
+            
+            // 1. 计算新坐标
+            let new_x = game_state.player_x + dx;
+            let new_y = game_state.player_y + dy;
+            let new_scene_x = game_state.current_scene_x;
+            let new_scene_y = game_state.current_scene_y;
+            let is_cross_scene = false;
+
+            // 2. 边界检测（跨场景/穿墙）
+            if (new_x < 0) {
+                new_scene_x = game_state.current_scene_x - 1;
+                new_x = MAP_SIZE - 1;
+                is_cross_scene = true;
+            } else if (new_x >= MAP_SIZE) {
+                new_scene_x = game_state.current_scene_x + 1;
+                new_x = 0;
+                is_cross_scene = true;
+            } else if (new_y < 0) {
+                new_scene_y = game_state.current_scene_y - 1;
+                new_y = MAP_SIZE - 1;
+                is_cross_scene = true;
+            } else if (new_y >= MAP_SIZE) {
+                new_scene_y = game_state.current_scene_y + 1;
+                new_y = 0;
+                is_cross_scene = true;
+            } else if (game_state.current_scene_data.grid[new_y][new_x] === 1) {
+                // 穿墙检测：无法移动
+                return;
+            }
+
+            // 3. 单场景内移动（核心：WASD控制）
+            if (!is_cross_scene) {
+                // 扣减饥饿值（移动消耗）
+                game_state.player_status.hunger = Math.max(0, game_state.player_status.hunger - 1);
+                save_player_status();
+
+                // 碰撞检测：交互物
+                let collided_entity = null;
+                game_state.current_scene_data.entities.forEach(entity => {
+                    if (entity.x === new_x && entity.y === new_y) {
+                        collided_entity = entity;
+                    }
+                });
+
+                if (collided_entity) {
+                    switch (collided_entity.type) {
+                        case "npc":
+                            show_dialog(collided_entity.plot);
+                            break;
+                        case "enemy":
+                            fight_enemy(collided_entity);
+                            break;
+                        case "box":
+                        case "food":
+                            collect_item(collided_entity);
+                            break;
+                    }
+                    // 交互后不移动（除了战斗）
+                    if (collided_entity.type !== "enemy") return;
+                }
+
+                // 更新主角位置（DOM操作）
+                const old_cell = document.getElementById("player");
+                old_cell.id = `cell_${game_state.player_x}_${game_state.player_y}`;
+                // 恢复旧位置样式
+                if (game_state.current_scene_data.grid[game_state.player_y][game_state.player_x] === 1) {
+                    old_cell.className = "wall";
+                    old_cell.innerText = "■";
+                } else {
+                    old_cell.className = "ground";
+                    old_cell.innerText = "·";
+                }
+
+                // 更新主角XY坐标
+                game_state.player_x = new_x;
+                game_state.player_y = new_y;
+
+                // 渲染新位置主角
+                const new_cell = document.getElementById(`cell_${new_x}_${new_y}`);
+                new_cell.id = "player";
+                new_cell.innerText = "🧙";
+
+                // 更新场景状态
+                document.getElementById("scene-status").innerText = 
+                    `场景(${game_state.current_scene_x},${game_state.current_scene_y}) | 主角(${new_x},${new_y}) | 种子：${game_state.current_seed} | 交互物：${game_state.current_scene_data.entities.length}个`;
+            } 
+            // 4. 跨场景：保存种子 + 加载新场景
+            else {
+                save_scene_seed(game_state.current_scene_x, game_state.current_scene_y, game_state.current_seed);
+                game_state.current_scene_x = new_scene_x;
+                game_state.current_scene_y = new_scene_y;
+                game_state.player_x = new_x;
+                game_state.player_y = new_y;
+                await init_scene(new_scene_x, new_scene_y);
+            }
+        }
+
+        // ========== 绑定WASD按键（核心控制） ==========
+        document.addEventListener("keydown", (e) => {
+            e.preventDefault();
+            switch(e.key.toLowerCase()) {
+                case "w": move_player(0, -1); break; // W：上（Y-1）
+                case "s": move_player(0, 1); break;  // S：下（Y+1）
+                case "a": move_player(-1, 0); break; // A：左（X-1）
+                case "d": move_player(1, 0); break;  // D：右（X+1）
+            }
+        });
+
+        // 点击地图聚焦
+        document.getElementById("map").addEventListener("click", () => {
+            document.getElementById("map").focus();
+        });
+
+        // 启动游戏（初始场景0,0）
+        init_scene(0, 0);
+    </script>
+</body>
+</html>
